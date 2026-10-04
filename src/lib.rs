@@ -257,6 +257,11 @@ mod tests {
                 Err(Error::TooShort { len: l }) if l == len
             ));
         }
+        // A text under 8 bytes seals to exactly the minimum length.
+        let short = seal_with(KEY, SALT, IV, fast(), b"hi");
+        let bytes = short.to_bytes();
+        assert_eq!(bytes.len(), MIN_LEN);
+        assert_eq!(Sealed::from_bytes(&bytes).expect("minimum length"), short);
         assert!(matches!(
             Sealed::from_bytes(&[0; MIN_LEN + 4]),
             Err(Error::Unaligned { len: 36 })

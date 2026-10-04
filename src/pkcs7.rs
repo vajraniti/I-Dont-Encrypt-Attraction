@@ -65,6 +65,9 @@ mod tests {
             &b""[..],
             b"1234567\x00",
             b"1234567\x09",
+            // Long enough that only the 1..=8 range check can reject them.
+            b"1234567\x09\x09\x09\x09\x09\x09\x09\x09\x09",
+            &[16; 16],
             b"\x05\x05",
             b"12345\x03\x02\x03",
             b"1234\x04\x04\x04\x05",
