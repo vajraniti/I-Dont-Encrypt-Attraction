@@ -56,8 +56,8 @@ fn seal_with(
     rounds: NonZeroU32,
     plaintext: &[u8],
 ) -> Result<Sealed, Error> {
-    // Checked before the key derivation: no point spending 0.2 s on a
-    // plaintext that can't be encrypted.
+    // Checked before the key derivation: no point running 600 000 rounds for
+    // a plaintext that can't be encrypted.
     let mut blocks = whole_blocks(plaintext)?.to_vec();
     cbc::encrypt(&cipher(passphrase, &salt, rounds), &iv, &mut blocks);
     Ok(Sealed { salt, iv, blocks })
@@ -111,7 +111,7 @@ impl Sealed {
         bytes
     }
 
-    /// Decrypts the message; deriving the key takes about 0.2 s. A wrong
+    /// Decrypts the message; deriving the key takes about 0.1 s. A wrong
     /// passphrase isn't an error: CBC can't tell it apart from the right
     /// one, so it returns noise.
     pub fn open(&self, passphrase: &[u8]) -> Vec<u8> {
@@ -138,7 +138,7 @@ mod tests {
     const SALT: Salt = *b"16 bytes of salt";
     const IV: Block = *b"\x00\x11\x22\x33\x44\x55\x66\x77";
 
-    /// Few rounds, so the tests don't spend 0.2 s on every key derivation.
+    /// Few rounds, so the tests don't run 600 000 for every key derivation.
     fn fast() -> NonZeroU32 {
         NonZeroU32::new(1_000).expect("1000 is not zero")
     }

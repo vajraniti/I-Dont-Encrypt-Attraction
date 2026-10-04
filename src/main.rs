@@ -1,4 +1,4 @@
-//! `enc` seals a text under a 16-byte key and prints it as hex; `dec` takes
+//! `enc` seals a text under a passphrase and prints it as hex; `dec` takes
 //! the hex back and reveals the text.
 
 mod reveal;
@@ -11,7 +11,7 @@ use idea_cbc::{Sealed, hex};
 
 const USAGE: &str = "\
 Usage:
-  idea-cbc enc [-k KEY] <TEXT>   encrypt TEXT, print IV + ciphertext as hex
+  idea-cbc enc [-k KEY] <TEXT>   encrypt TEXT, print salt + IV + ciphertext as hex
   idea-cbc dec [-k KEY] <HEX>    decrypt HEX and reveal the text
 
 KEY is a passphrase of any length; without -k it is asked for on the terminal.
@@ -105,6 +105,11 @@ fn encrypt(key: Option<String>, text: &str) -> Result<()> {
     if text.is_empty() {
         bail!("nothing to encrypt: the text is empty");
     }
+    // `dec` only prints what passes this check and calls anything else a
+    // wrong key, so a text that fails it could never be read back.
+    if readable_text(text.as_bytes()).is_none() {
+        bail!("the text has control characters other than line breaks and tabs");
+    }
     let key = match key {
         Some(key) => key,
         None => prompt_key()?,
@@ -164,19 +169,25 @@ fn prompt_key() -> Result<String> {
         eprintln!();
         bail!("no key: input ended before one was typed");
     }
-    // Only the line ending goes: spaces are part of the key.
-    let key = line.strip_suffix('\n').unwrap_or(&line);
-    Ok(key.strip_suffix('\r').unwrap_or(key).to_owned())
+    Ok(trim_line_ending(&line).to_owned())
+}
+
+/// Drops one `\n` or `\r\n` from the end of a typed line. Nothing else is
+/// trimmed: spaces are part of the key.
+fn trim_line_ending(line: &str) -> &str {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    line.strip_suffix('\r').unwrap_or(line)
 }
 
 /// CBC has no integrity check, so the only sign of a wrong key is output
-/// that isn't text. Noise passes for a single 8-byte block about once in 600
-/// tries, and for the demo's 32 bytes about once in 70 billion.
+/// that isn't text: valid UTF-8 with no control characters besides line
+/// breaks and tabs. Noise passes for a single 8-byte block about once in 570
+/// tries, and for the demo's 32 bytes about once in 56 billion.
 fn readable_text(bytes: &[u8]) -> Option<&str> {
     let text = std::str::from_utf8(bytes).ok()?;
     let readable = text
         .chars()
-        .all(|c| !c.is_control() || matches!(c, '\n' | '\t'));
+        .all(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'));
     readable.then_some(text)
 }
 
@@ -266,8 +277,19 @@ mod tests {
             readable_text("line\n\tтекст".as_bytes()),
             Some("line\n\tтекст")
         );
+        assert_eq!(readable_text(b"windows\r\nlines"), Some("windows\r\nlines"));
         assert_eq!(readable_text(b"bell\x07"), None);
+        assert_eq!(readable_text(b"\x1b[2Jescape"), None);
         assert_eq!(readable_text(b"\xFF\xFE"), None);
+    }
+
+    #[test]
+    fn only_the_line_ending_is_trimmed_from_a_typed_key() {
+        assert_eq!(trim_line_ending("Dance with me ;)\n"), "Dance with me ;)");
+        assert_eq!(trim_line_ending("Dance with me ;)\r\n"), "Dance with me ;)");
+        assert_eq!(trim_line_ending("no newline"), "no newline");
+        assert_eq!(trim_line_ending("  spaced key  \n"), "  spaced key  ");
+        assert_eq!(trim_line_ending("two\n\n"), "two\n");
     }
 
     #[test]

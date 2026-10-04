@@ -10,8 +10,9 @@ use std::num::NonZeroU32;
 
 use sha2::{Digest, Sha256};
 
-/// OWASP's recommended work factor for PBKDF2-HMAC-SHA-256: about 0.2 s per
-/// derivation on a modern CPU in a release build.
+/// OWASP's recommended work factor for PBKDF2-HMAC-SHA-256. A release build
+/// takes about 0.1 s per derivation on a CPU with SHA instructions and about
+/// 0.3 s on one without.
 pub(crate) const ROUNDS: NonZeroU32 = NonZeroU32::new(600_000).expect("600 000 is not zero");
 pub(crate) const SALT_LEN: usize = 16;
 
@@ -131,6 +132,34 @@ mod tests {
                 HmacSha256::new(key).mac(message)[..],
                 unhex(tag),
                 "case {i}"
+            );
+        }
+    }
+
+    /// Keys of 63, 64 and 65 bytes: only a key longer than the 64-byte block
+    /// is hashed first, and RFC 4231 has no key at the boundary. Tags computed
+    /// with OpenSSL.
+    #[test]
+    fn hmac_key_at_the_block_boundary() {
+        let cases = [
+            (
+                63,
+                "b176405584df87db508aee7e8d9ef11482cca92efc74d994f593a7e21207cef1",
+            ),
+            (
+                64,
+                "ebef34e13d0a0fe04593d043bc7a865106db0604211d404c18206d862e5d7852",
+            ),
+            (
+                65,
+                "00af6c42340b99e2e1d9a1cdf1547be431fe2e9bab3215c68d013ba858891927",
+            ),
+        ];
+        for (len, tag) in cases {
+            assert_eq!(
+                HmacSha256::new(&vec![0xAA; len]).mac(b"Hi There")[..],
+                unhex(tag),
+                "{len}-byte key"
             );
         }
     }
