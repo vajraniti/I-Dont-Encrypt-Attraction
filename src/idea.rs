@@ -5,7 +5,7 @@
 //! over each other, which is where the cipher gets its confusion from.
 
 pub(crate) const BLOCK_LEN: usize = 8;
-pub const KEY_LEN: usize = 16;
+pub(crate) const KEY_LEN: usize = 16;
 
 pub(crate) type Block = [u8; BLOCK_LEN];
 

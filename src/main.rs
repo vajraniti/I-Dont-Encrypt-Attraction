@@ -7,14 +7,14 @@ use std::io::{self, BufRead, IsTerminal};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow, bail};
-use idea_cbc::{KEY_LEN, Sealed, hex};
+use idea_cbc::{Sealed, hex};
 
 const USAGE: &str = "\
 Usage:
   idea-cbc enc [-k KEY] <TEXT>   encrypt TEXT, print IV + ciphertext as hex
   idea-cbc dec [-k KEY] <HEX>    decrypt HEX and reveal the text
 
-KEY must be exactly 16 bytes; without -k it is asked for on the terminal.
+KEY is a passphrase of any length; without -k it is asked for on the terminal.
 TEXT must be a multiple of 8 bytes long: there is no padding.
 Put -- before a TEXT that starts with a dash.";
 
@@ -110,7 +110,7 @@ fn encrypt(key: Option<String>, text: &str) -> Result<()> {
         None => prompt_key()?,
     };
     let sealed =
-        idea_cbc::seal(&key_bytes(&key)?, text.as_bytes()).context("encrypting the text")?;
+        idea_cbc::seal(key_bytes(&key)?, text.as_bytes()).context("encrypting the text")?;
     println!("{}", hex::encode(&sealed.to_bytes()));
     Ok(())
 }
@@ -128,7 +128,7 @@ fn decrypt(key: Option<String>, hex_input: &str) -> Result<ExitCode> {
             prompt_key()?
         }
     };
-    let plaintext = sealed.open(&key_bytes(&key)?);
+    let plaintext = sealed.open(key_bytes(&key)?);
 
     let mut out = io::stdout().lock();
     let animate = out.is_terminal();
@@ -145,10 +145,11 @@ fn decrypt(key: Option<String>, hex_input: &str) -> Result<ExitCode> {
     Ok(ExitCode::FAILURE)
 }
 
-fn key_bytes(key: &str) -> Result<[u8; KEY_LEN]> {
-    key.as_bytes()
-        .try_into()
-        .map_err(|_| anyhow!("the key must be exactly {KEY_LEN} bytes, got {}", key.len()))
+fn key_bytes(key: &str) -> Result<&[u8]> {
+    if key.is_empty() {
+        bail!("the key is empty");
+    }
+    Ok(key.as_bytes())
 }
 
 fn prompt_key() -> Result<String> {
@@ -250,13 +251,12 @@ mod tests {
     }
 
     #[test]
-    fn key_must_be_sixteen_bytes() {
-        assert_eq!(
-            &key_bytes("Dance with me ;)").expect("16 bytes"),
-            b"Dance with me ;)"
-        );
-        let err = key_bytes("Dance with me").expect_err("13 bytes");
-        assert_eq!(err.to_string(), "the key must be exactly 16 bytes, got 13");
+    fn key_can_be_any_length_but_not_empty() {
+        assert_eq!(key_bytes("k").expect("one byte"), b"k");
+        assert_eq!(key_bytes("Dance with me ;)").expect("16 bytes").len(), 16);
+        assert_eq!(key_bytes("танцуй со мной!").expect("27 bytes").len(), 27);
+        let err = key_bytes("").expect_err("empty");
+        assert_eq!(err.to_string(), "the key is empty");
     }
 
     #[test]

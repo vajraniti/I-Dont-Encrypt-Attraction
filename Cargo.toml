@@ -9,7 +9,14 @@ publish = false
 [dependencies]
 anyhow = "1.0.104"
 getrandom = { version = "0.4.3", features = ["std"] }
+sha2 = { version = "0.11.0", default-features = false }
 thiserror = "2.0.21"
+
+# The key derivation runs 600 000 rounds of HMAC-SHA-256: about 0.1 s with
+# optimizations and nearly 4 s without, which would stall `cargo run` and
+# `cargo test` in the default dev profile.
+[profile.dev]
+opt-level = 1
 
 [lints.rust]
 unsafe_code = "forbid"
