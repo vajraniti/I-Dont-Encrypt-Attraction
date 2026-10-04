@@ -1,0 +1,282 @@
+//! `enc` seals a text under a 16-byte key and prints it as hex; `dec` takes
+//! the hex back and reveals the text.
+
+mod reveal;
+
+use std::io::{self, BufRead, IsTerminal};
+use std::process::ExitCode;
+
+use anyhow::{Context, Result, anyhow, bail};
+use idea_cbc::{KEY_LEN, Sealed, hex};
+
+const USAGE: &str = "\
+Usage:
+  idea-cbc enc [-k KEY] <TEXT>   encrypt TEXT, print IV + ciphertext as hex
+  idea-cbc dec [-k KEY] <HEX>    decrypt HEX and reveal the text
+
+KEY must be exactly 16 bytes; without -k it is asked for on the terminal.
+TEXT must be a multiple of 8 bytes long: there is no padding.
+Put -- before a TEXT that starts with a dash.";
+
+/// How many bytes of noise a wrong key gets to show.
+const NOISE_PREVIEW: usize = 12;
+
+#[derive(Debug, PartialEq)]
+enum Cli {
+    Help,
+    Enc { key: Option<String>, text: String },
+    Dec { key: Option<String>, hex: String },
+}
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<ExitCode> {
+    let args = std::env::args_os()
+        .skip(1)
+        .map(|arg| {
+            arg.into_string()
+                .map_err(|arg| anyhow!("argument {arg:?} is not valid UTF-8"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    match parse(args)? {
+        Cli::Help => {
+            println!("{USAGE}");
+            Ok(ExitCode::SUCCESS)
+        }
+        Cli::Enc { key, text } => {
+            encrypt(key, &text)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Cli::Dec { key, hex } => decrypt(key, &hex),
+    }
+}
+
+fn parse(args: Vec<String>) -> Result<Cli> {
+    type Build = fn(Option<String>, String) -> Cli;
+    let mut args = args.into_iter();
+    let command = args.next();
+    let (what, build): (&str, Build) = match command.as_deref() {
+        Some("enc") => ("TEXT", |key, text| Cli::Enc { key, text }),
+        Some("dec") => ("HEX", |key, hex| Cli::Dec { key, hex }),
+        Some("-h" | "--help") => return Ok(Cli::Help),
+        Some(other) => bail!("unknown command {other:?}\n\n{USAGE}"),
+        None => bail!("no command given\n\n{USAGE}"),
+    };
+
+    let mut key = None;
+    let mut input = None;
+    let mut options_done = false;
+    while let Some(arg) = args.next() {
+        let is_option = !options_done && arg.starts_with('-') && arg.len() > 1;
+        if !is_option {
+            if input.replace(arg).is_some() {
+                bail!("more than one {what} given; quote it if it contains spaces");
+            }
+            continue;
+        }
+        match arg.as_str() {
+            "--" => options_done = true,
+            "-h" | "--help" => return Ok(Cli::Help),
+            "-k" | "--key" => {
+                let value = args
+                    .next()
+                    .with_context(|| format!("{arg} needs a value"))?;
+                if key.replace(value).is_some() {
+                    bail!("the key is given twice");
+                }
+            }
+            _ => bail!("unknown option {arg:?}\n\n{USAGE}"),
+        }
+    }
+
+    let input = input.with_context(|| format!("no {what} given\n\n{USAGE}"))?;
+    Ok(build(key, input))
+}
+
+fn encrypt(key: Option<String>, text: &str) -> Result<()> {
+    if text.is_empty() {
+        bail!("nothing to encrypt: the text is empty");
+    }
+    let key = match key {
+        Some(key) => key,
+        None => prompt_key()?,
+    };
+    let sealed =
+        idea_cbc::seal(&key_bytes(&key)?, text.as_bytes()).context("encrypting the text")?;
+    println!("{}", hex::encode(&sealed.to_bytes()));
+    Ok(())
+}
+
+fn decrypt(key: Option<String>, hex_input: &str) -> Result<ExitCode> {
+    // The message is checked before the key is asked for: no point typing a
+    // key for hex that was cut off when copied.
+    let bytes = hex::decode(hex_input).context("reading the hex")?;
+    let sealed = Sealed::from_bytes(&bytes).context("reading the message")?;
+    let key = match key {
+        Some(key) => key,
+        None => {
+            // The demo: the noise first, then the question.
+            eprintln!("{}", hex::encode(&bytes));
+            prompt_key()?
+        }
+    };
+    let plaintext = sealed.open(&key_bytes(&key)?);
+
+    let mut out = io::stdout().lock();
+    let animate = out.is_terminal();
+    if let Some(text) = readable_text(&plaintext) {
+        reveal::show(&mut out, text, animate).context("printing the text")?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    reveal::show(&mut out, &noise_preview(&plaintext), animate).context("printing the noise")?;
+    eprintln!(
+        "✗ wrong key: that's noise (first {} of {} bytes)",
+        plaintext.len().min(NOISE_PREVIEW),
+        plaintext.len()
+    );
+    Ok(ExitCode::FAILURE)
+}
+
+fn key_bytes(key: &str) -> Result<[u8; KEY_LEN]> {
+    key.as_bytes()
+        .try_into()
+        .map_err(|_| anyhow!("the key must be exactly {KEY_LEN} bytes, got {}", key.len()))
+}
+
+fn prompt_key() -> Result<String> {
+    eprint!("key: ");
+    let mut line = String::new();
+    let read = io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .context("reading the key")?;
+    if read == 0 {
+        // End the prompt line so the error doesn't land after "key: ".
+        eprintln!();
+        bail!("no key: input ended before one was typed");
+    }
+    // Only the line ending goes: spaces are part of the key.
+    let key = line.strip_suffix('\n').unwrap_or(&line);
+    Ok(key.strip_suffix('\r').unwrap_or(key).to_owned())
+}
+
+/// CBC has no integrity check, so the only sign of a wrong key is output
+/// that isn't text. Noise passes for a single 8-byte block about once in 600
+/// tries, and for the demo's 32 bytes about once in 70 billion.
+fn readable_text(bytes: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let readable = text
+        .chars()
+        .all(|c| !c.is_control() || matches!(c, '\n' | '\t'));
+    readable.then_some(text)
+}
+
+/// A short look at the noise: bytes read as Latin-1, which is how mojibake
+/// looks, with anything unprintable shown as `·`.
+fn noise_preview(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .take(NOISE_PREVIEW)
+        .map(|&b| {
+            let c = char::from(b);
+            if reveal::is_plain(c) { c } else { '·' }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(s: &[&str]) -> Vec<String> {
+        s.iter().map(|&a| a.to_owned()).collect()
+    }
+
+    #[test]
+    fn parses_commands() {
+        assert_eq!(
+            parse(args(&["enc", "-k", "Dance with me ;)", "In Darkness"])).expect("valid"),
+            Cli::Enc {
+                key: Some("Dance with me ;)".into()),
+                text: "In Darkness".into()
+            }
+        );
+        assert_eq!(
+            parse(args(&["dec", "00ff"])).expect("valid"),
+            Cli::Dec {
+                key: None,
+                hex: "00ff".into()
+            }
+        );
+        assert_eq!(
+            parse(args(&["dec", "00ff", "--key", "k"])).expect("options go anywhere"),
+            Cli::Dec {
+                key: Some("k".into()),
+                hex: "00ff".into()
+            }
+        );
+        assert_eq!(
+            parse(args(&["enc", "--", "-k"])).expect("-- ends options"),
+            Cli::Enc {
+                key: None,
+                text: "-k".into()
+            }
+        );
+        assert_eq!(parse(args(&["--help"])).expect("valid"), Cli::Help);
+        assert_eq!(parse(args(&["dec", "-h"])).expect("valid"), Cli::Help);
+    }
+
+    #[test]
+    fn rejects_bad_arguments() {
+        for bad in [
+            &[][..],
+            &["encrypt", "x"],
+            &["enc"],
+            &["enc", "a", "b"],
+            &["enc", "-k"],
+            &["enc", "-k", "a", "-k", "b", "x"],
+            &["dec", "-x", "00"],
+        ] {
+            assert!(parse(args(bad)).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn key_must_be_sixteen_bytes() {
+        assert_eq!(
+            &key_bytes("Dance with me ;)").expect("16 bytes"),
+            b"Dance with me ;)"
+        );
+        let err = key_bytes("Dance with me").expect_err("13 bytes");
+        assert_eq!(err.to_string(), "the key must be exactly 16 bytes, got 13");
+    }
+
+    #[test]
+    fn tells_text_from_noise() {
+        assert_eq!(readable_text(b"In Darkness"), Some("In Darkness"));
+        assert_eq!(
+            readable_text("line\n\tтекст".as_bytes()),
+            Some("line\n\tтекст")
+        );
+        assert_eq!(readable_text(b"bell\x07"), None);
+        assert_eq!(readable_text(b"\xFF\xFE"), None);
+    }
+
+    #[test]
+    fn noise_preview_is_short_and_printable() {
+        let noise: Vec<u8> = (0..32).map(|i| i * 8 + 3).collect();
+        let preview = noise_preview(&noise);
+        assert_eq!(preview.chars().count(), NOISE_PREVIEW);
+        assert!(preview.chars().all(reveal::is_plain));
+        assert_eq!(preview, "····#+3;CKS[");
+        assert_eq!(noise_preview(b"\xAD\x85"), "··");
+    }
+}

@@ -1,0 +1,15 @@
+[package]
+name = "idea-cbc"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "IDEA block cipher in CBC mode, with a terminal decryption reveal"
+publish = false
+
+[dependencies]
+anyhow = "1.0.104"
+getrandom = { version = "0.4.3", features = ["std"] }
+thiserror = "2.0.21"
+
+[lints.rust]
+unsafe_code = "forbid"
