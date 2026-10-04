@@ -7,7 +7,7 @@ use std::io::{self, BufRead, IsTerminal};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow, bail};
-use idea_cbc::{Sealed, hex};
+use idea_cbc::{BadPadding, Sealed, hex};
 
 const USAGE: &str = "\
 Usage:
@@ -15,7 +15,6 @@ Usage:
   idea-cbc dec [-k KEY] <HEX>    decrypt HEX and reveal the text
 
 KEY is a passphrase of any length; without -k it is asked for on the terminal.
-TEXT must be a multiple of 8 bytes long: there is no padding.
 Put -- before a TEXT that starts with a dash.";
 
 /// How many bytes of noise a wrong key gets to show.
@@ -133,19 +132,25 @@ fn decrypt(key: Option<String>, hex_input: &str) -> Result<ExitCode> {
             prompt_key()?
         }
     };
-    let plaintext = sealed.open(key_bytes(&key)?);
+    let opened = sealed.open(key_bytes(&key)?);
 
     let mut out = io::stdout().lock();
     let animate = out.is_terminal();
-    if let Some(text) = readable_text(&plaintext) {
+    if let Ok(plaintext) = &opened
+        && let Some(text) = readable_text(plaintext)
+    {
         reveal::show(&mut out, text, animate).context("printing the text")?;
         return Ok(ExitCode::SUCCESS);
     }
-    reveal::show(&mut out, &noise_preview(&plaintext), animate).context("printing the noise")?;
+    let noise = match opened {
+        Ok(plaintext) => plaintext,
+        Err(BadPadding { noise }) => noise,
+    };
+    reveal::show(&mut out, &noise_preview(&noise), animate).context("printing the noise")?;
     eprintln!(
-        "✗ wrong key: that's noise (first {} of {} bytes)",
-        plaintext.len().min(NOISE_PREVIEW),
-        plaintext.len()
+        "✗ wrong key, or the hex got damaged (first {} of {} bytes above)",
+        noise.len().min(NOISE_PREVIEW),
+        noise.len()
     );
     Ok(ExitCode::FAILURE)
 }
@@ -179,10 +184,11 @@ fn trim_line_ending(line: &str) -> &str {
     line.strip_suffix('\r').unwrap_or(line)
 }
 
-/// CBC has no integrity check, so the only sign of a wrong key is output
-/// that isn't text: valid UTF-8 with no control characters besides line
-/// breaks and tabs. Noise passes for a single 8-byte block about once in 570
-/// tries, and for the demo's 32 bytes about once in 56 billion.
+/// CBC has no integrity check, so a wrong key shows only as noise. Most of
+/// the time the padding check in `Sealed::open` catches it; this catches the
+/// rest by asking for text: valid UTF-8 with no control characters besides
+/// line breaks and tabs. Noise gets past both about once in 67 000 tries for
+/// a one-block message, and about once in 3·10^15 for the demo's five blocks.
 fn readable_text(bytes: &[u8]) -> Option<&str> {
     let text = std::str::from_utf8(bytes).ok()?;
     let readable = text
